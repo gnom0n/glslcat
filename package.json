@@ -1,0 +1,14 @@
+{
+  "name": "glslcat",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite --port 3333",
+    "build": "vite build",
+    "preview": "vite preview --port 3333"
+  },
+  "devDependencies": {
+    "vite": "^6"
+  }
+}
