@@ -9,7 +9,11 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const POSE_KEYS = [0, 1, 2, 3, 5, 6];
 
 function shaderConfigToGLSL(cfg) {
-  const INT_KEYS = new Set(["TAIL_SDF_SAMPLES", "RAYMARCH_STEPS", "SHADOW_STEPS"]);
+  const INT_KEYS = new Set([
+    "TAIL_SDF_SAMPLES",
+    "RAYMARCH_STEPS",
+    "SHADOW_STEPS",
+  ]);
   const lines = [];
   for (const [key, val] of Object.entries(cfg)) {
     if (Array.isArray(val)) {
@@ -57,8 +61,7 @@ function compileShader(gl, type, source) {
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const log =
-      gl.getShaderInfoLog(shader) || "Unknown shader compile error";
+    const log = gl.getShaderInfoLog(shader) || "Unknown shader compile error";
     gl.deleteShader(shader);
     throw new Error(log);
   }
@@ -85,8 +88,7 @@ function createProgram(gl, fragSource) {
   gl.deleteShader(fs);
 
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const log =
-      gl.getProgramInfoLog(program) || "Unknown program link error";
+    const log = gl.getProgramInfoLog(program) || "Unknown program link error";
     gl.deleteProgram(program);
     throw new Error(log);
   }
@@ -184,8 +186,10 @@ function resizeCanvas(gl, canvas) {
     window.devicePixelRatio || 1,
     CAT_CONFIG.rendering.maxPixelRatio,
   );
-  const w = Math.max(1, Math.round(window.innerWidth * dpr));
-  const h = Math.max(1, Math.round(window.innerHeight * dpr));
+  const cssW = canvas.clientWidth || window.innerWidth;
+  const cssH = canvas.clientHeight || window.innerHeight;
+  const w = Math.max(1, Math.round(cssW * dpr));
+  const h = Math.max(1, Math.round(cssH * dpr));
   if (canvas.width === w && canvas.height === h) return;
   canvas.width = w;
   canvas.height = h;
@@ -243,15 +247,21 @@ function attachInputHandlers(canvas, state) {
   window.addEventListener(
     "keydown",
     (e) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
       const key = e.key;
       if (key === "ArrowUp" && !state.arrowUp) {
         state.arrowUp = true;
         setPose(state, 4);
         return;
       }
-      if (key === "ArrowLeft") { state.arrowLeft = true; return; }
-      if (key === "ArrowRight") { state.arrowRight = true; return; }
+      if (key === "ArrowLeft") {
+        state.arrowLeft = true;
+        return;
+      }
+      if (key === "ArrowRight") {
+        state.arrowRight = true;
+        return;
+      }
       const lk = key.toLowerCase();
       if (lk >= "1" && lk <= "6") {
         setPose(state, POSE_KEYS[lk.charCodeAt(0) - 49]);
@@ -265,8 +275,9 @@ function attachInputHandlers(canvas, state) {
         if (
           (state.toPose === 1 || state.toPose === 6) &&
           state.blendT >= 1 && state.lickT >= 1
-        )
+        ) {
           state.lickT = 0;
+        }
       }
     },
     { passive: true },
@@ -281,29 +292,37 @@ function attachInputHandlers(canvas, state) {
         if (state.toPose === 4) setPose(state, 0);
         return;
       }
-      if (key === "ArrowLeft") { state.arrowLeft = false; return; }
-      if (key === "ArrowRight") { state.arrowRight = false; return; }
+      if (key === "ArrowLeft") {
+        state.arrowLeft = false;
+        return;
+      }
+      if (key === "ArrowRight") {
+        state.arrowRight = false;
+        return;
+      }
     },
     { passive: true },
   );
 }
 
 function updateSimulation(state, dt) {
-  if (state.blendT < 1)
+  if (state.blendT < 1) {
     state.blendT = Math.min(
       1,
       state.blendT + dt / state.blendDurationSec,
     );
-  if (state.lickT < 1)
+  }
+  if (state.lickT < 1) {
     state.lickT = Math.min(
       1,
       state.lickT + dt / CAT_CONFIG.animation.lickSeconds,
     );
-  const headTarget = ((state.arrowRight ? 1 : 0) - (state.arrowLeft ? 1 : 0))
-    * CAT_CONFIG.animation.headTurnMax;
+  }
+  const headTarget = ((state.arrowRight ? 1 : 0) - (state.arrowLeft ? 1 : 0)) *
+    CAT_CONFIG.animation.headTurnMax;
   const headSpeed = CAT_CONFIG.animation.headTurnSpeed;
-  // exponential smoothing — approaches target asymptotically at headTurnSpeed
-  state.headYawOffset += (headTarget - state.headYawOffset) * Math.min(1, headSpeed * dt);
+  const easeFactor = 1 - Math.exp(-headSpeed * dt);
+  state.headYawOffset += (headTarget - state.headYawOffset) * easeFactor;
 }
 
 function applyUniforms(gl, uniforms, canvas, state, now, start) {
@@ -313,20 +332,24 @@ function applyUniforms(gl, uniforms, canvas, state, now, start) {
   const camY = state.camD * sp + 0.1;
   const camZ = state.camD * cp * Math.cos(state.camT);
 
-  if (uniforms.resolution)
+  if (uniforms.resolution) {
     gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+  }
   if (uniforms.time) gl.uniform1f(uniforms.time, (now - start) * 0.001);
-  if (uniforms.camera)
+  if (uniforms.camera) {
     gl.uniform3f(uniforms.camera, camX, camY, camZ);
+  }
   if (uniforms.from) gl.uniform1f(uniforms.from, state.fromPose);
   if (uniforms.to) gl.uniform1f(uniforms.to, state.toPose);
   if (uniforms.blend) gl.uniform1f(uniforms.blend, eased);
   if (uniforms.mode) gl.uniform1i(uniforms.mode, state.mode);
   if (uniforms.lick) gl.uniform1f(uniforms.lick, state.lickT);
-  if (uniforms.walkOffset)
+  if (uniforms.walkOffset) {
     gl.uniform1f(uniforms.walkOffset, state.walkOffset);
-  if (uniforms.headYaw)
+  }
+  if (uniforms.headYaw) {
     gl.uniform1f(uniforms.headYaw, state.headYawOffset);
+  }
 }
 
 async function init() {
@@ -344,11 +367,11 @@ async function init() {
   const endifIdx = fragSource.indexOf("#endif");
   if (endifIdx < 0) throw new Error("cat.frag: missing #endif precision guard");
   const insertPos = endifIdx + "#endif".length;
-  const fullSource =
-    fragSource.slice(0, insertPos) +
+  const fullSource = fragSource.slice(0, insertPos) +
     "\n" +
     configGLSL +
     fragSource.slice(insertPos);
+
   const program = createProgram(gl, fullSource);
   gl.useProgram(program);
   setupFullscreenQuad(gl, program);
@@ -358,7 +381,17 @@ async function init() {
 
   const resize = () => resizeCanvas(gl, canvas);
   resize();
-  window.addEventListener("resize", resize, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
+    window.addEventListener(
+      "beforeunload",
+      () => observer.disconnect(),
+      { once: true, passive: true },
+    );
+  } else {
+    window.addEventListener("resize", resize, { passive: true });
+  }
 
   document.getElementById("loading")?.remove();
 
@@ -366,7 +399,7 @@ async function init() {
   state.startTime = start;
   let prev = start;
   function frame(now) {
-    const dt = (now - prev) * 0.001;
+    const dt = Math.min((now - prev) * 0.001, 0.1);
     prev = now;
     updateSimulation(state, dt);
     applyUniforms(gl, uniforms, canvas, state, now, start);

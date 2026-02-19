@@ -11,8 +11,8 @@ const QUALITY_PRESETS = {
   },
 };
 
-const quality =
-  new URLSearchParams(window.location.search).get("quality") || "fast";
+const quality = new URLSearchParams(window.location.search).get("quality") ||
+  "fast";
 const preset = QUALITY_PRESETS[quality] || QUALITY_PRESETS.fast;
 
 export const CAT_CONFIG = {
@@ -48,11 +48,16 @@ export const CAT_CONFIG = {
     // OnBack requires standing (0) as an intermediate — direct transitions
     // to other grounded poses would clip through the floor
     blockedTransitions: {
-      '5_6': true, '6_5': true,  // OnBack ↔ UprightSit
-      '5_1': true, '1_5': true,  // OnBack ↔ Sit
-      '5_2': true, '2_5': true,  // OnBack ↔ Loaf
-      '5_3': true, '3_5': true,  // OnBack ↔ Stretch
-      '5_4': true, '4_5': true,  // OnBack ↔ Walk
+      "5_6": true,
+      "6_5": true, // OnBack ↔ UprightSit
+      "5_1": true,
+      "1_5": true, // OnBack ↔ Sit
+      "5_2": true,
+      "2_5": true, // OnBack ↔ Loaf
+      "5_3": true,
+      "3_5": true, // OnBack ↔ Stretch
+      "5_4": true,
+      "4_5": true, // OnBack ↔ Walk
     },
     headTurnSpeed: 6.0,
     headTurnMax: 0.5,

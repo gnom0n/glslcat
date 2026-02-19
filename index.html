@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -53,8 +53,12 @@
         padding: 2rem;
       }
       @media (max-width: 768px), (max-height: 500px) {
-        #mobile-notice { display: flex; }
-        #loading, canvas, #hint { display: none !important; }
+        #mobile-notice {
+          display: flex;
+        }
+        #loading, canvas, #hint {
+          display: none !important;
+        }
       }
     </style>
   </head>
@@ -66,8 +70,9 @@
       arrows walk/look | 1-6 pose | drag orbit | wheel zoom | D mode | L lick
     </div>
     <script type="module">
-      if (window.innerWidth > 768 && window.innerHeight > 500)
+      if (window.innerWidth > 768 && window.innerHeight > 500) {
         import("/main.js");
+      }
     </script>
   </body>
 </html>
