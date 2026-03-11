@@ -1,4 +1,4 @@
-const QUALITY_PRESETS = {
+export const QUALITY_PRESETS = {
   fast: {
     RAYMARCH_STEPS: 48,
     SHADOW_STEPS: 16,

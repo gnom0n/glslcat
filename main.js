@@ -1,21 +1,29 @@
-import { CAT_CONFIG } from "./cat-config.js";
+import { CAT_CONFIG, QUALITY_PRESETS } from "./cat-config.js";
+import { computeCatFK } from "./cat-fk.js";
 
 const VERT_SRC =
   "attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0.0,1.0);}";
 const FRAG_PATH = "cat.frag";
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
-// number keys 1-6 map to these pose indices; walk (4) is ArrowUp-only
 const POSE_KEYS = [0, 1, 2, 3, 5, 6];
 
+// ── Shader config ───────────────────────────────────────────────────────────
+
+function shaderConfigForPreset(preset) {
+  const base = { ...CAT_CONFIG.shader };
+  delete base.RAYMARCH_STEPS;
+  delete base.SHADOW_STEPS;
+  delete base.TAIL_SDF_SAMPLES;
+  return { ...base, ...preset };
+}
+
 function shaderConfigToGLSL(cfg) {
-  const INT_KEYS = new Set([
-    "TAIL_SDF_SAMPLES",
-    "RAYMARCH_STEPS",
-    "SHADOW_STEPS",
-  ]);
+  const INT_KEYS = new Set(["TAIL_SDF_SAMPLES", "RAYMARCH_STEPS", "SHADOW_STEPS"]);
+  const FK_ONLY_KEYS = new Set(["STRIDE_PERIOD"]);
   const lines = [];
   for (const [key, val] of Object.entries(cfg)) {
+    if (FK_ONLY_KEYS.has(key)) continue;
     if (Array.isArray(val)) {
       const t = "vec" + val.length;
       lines.push(`const ${t} ${key} = ${t}(${val.join(", ")});`);
@@ -30,6 +38,16 @@ function shaderConfigToGLSL(cfg) {
   lines.push(`const float HALFTONE_SIN = ${Math.sin(a).toFixed(5)};`);
   return lines.join("\n") + "\n";
 }
+
+function buildFullShaderSource(fragBase, preset) {
+  const configGLSL = shaderConfigToGLSL(shaderConfigForPreset(preset));
+  const endifIdx = fragBase.indexOf("#endif");
+  if (endifIdx < 0) throw new Error("cat.frag: missing #endif precision guard");
+  const insertPos = endifIdx + "#endif".length;
+  return fragBase.slice(0, insertPos) + "\n" + configGLSL + fragBase.slice(insertPos);
+}
+
+// ── GL helpers ──────────────────────────────────────────────────────────────
 
 function showError(message) {
   console.error(message);
@@ -55,53 +73,7 @@ function createGLContext(canvas) {
   return canvas.getContext("webgl2", opts) || canvas.getContext("webgl", opts);
 }
 
-function compileShader(gl, type, source) {
-  const shader = gl.createShader(type);
-  if (!shader) throw new Error("Failed to create shader object");
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(shader) || "Unknown shader compile error";
-    gl.deleteShader(shader);
-    throw new Error(log);
-  }
-  return shader;
-}
-
-function createProgram(gl, fragSource) {
-  const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
-  const fs = compileShader(gl, gl.FRAGMENT_SHADER, fragSource);
-  const program = gl.createProgram();
-  if (!program) {
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    throw new Error("Failed to create program object");
-  }
-
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-
-  gl.detachShader(program, vs);
-  gl.detachShader(program, fs);
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(program) || "Unknown program link error";
-    gl.deleteProgram(program);
-    throw new Error(log);
-  }
-  return program;
-}
-
-async function loadFragmentSource(path) {
-  const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(path + ": " + res.status);
-  return res.text();
-}
-
-function setupFullscreenQuad(gl, program) {
+function setupFullscreenQuad(gl) {
   const quad = gl.createBuffer();
   if (!quad) throw new Error("Failed to create vertex buffer");
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
@@ -110,27 +82,123 @@ function setupFullscreenQuad(gl, program) {
     new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
     gl.STATIC_DRAW,
   );
-
-  const aPos = gl.getAttribLocation(program, "a_pos");
-  if (aPos < 0) throw new Error("Missing attribute: a_pos");
-  gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 }
+
+// ── Async shader compilation ────────────────────────────────────────────────
+
+function startProgramCompile(gl, fragSource) {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, VERT_SRC);
+  gl.compileShader(vs);
+
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, fragSource);
+  gl.compileShader(fs);
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.bindAttribLocation(program, 0, "a_pos");
+  gl.linkProgram(program);
+
+  // Don't check status — let GPU compile asynchronously
+  return { program, vs, fs };
+}
+
+function validateProgram(gl, compile) {
+  const { program, vs, fs } = compile;
+  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(vs) || "vertex shader compile error";
+    cleanupCompile(gl, compile);
+    throw new Error(log);
+  }
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(fs) || "fragment shader compile error";
+    cleanupCompile(gl, compile);
+    throw new Error(log);
+  }
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(program) || "program link error";
+    cleanupCompile(gl, compile);
+    throw new Error(log);
+  }
+  // Detach and delete shader objects (program is linked)
+  gl.detachShader(program, vs);
+  gl.detachShader(program, fs);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  return program;
+}
+
+function cleanupCompile(gl, compile) {
+  gl.deleteShader(compile.vs);
+  gl.deleteShader(compile.fs);
+  gl.deleteProgram(compile.program);
+}
+
+function waitForCompletion(gl, compile, ext) {
+  return new Promise((resolve) => {
+    if (!ext) {
+      resolve();
+      return;
+    }
+    function check() {
+      if (gl.getProgramParameter(compile.program, ext.COMPLETION_STATUS_KHR)) {
+        resolve();
+      } else {
+        requestAnimationFrame(check);
+      }
+    }
+    requestAnimationFrame(check);
+  });
+}
+
+function isCompileComplete(gl, program, ext) {
+  if (!ext) return true;
+  return gl.getProgramParameter(program, ext.COMPLETION_STATUS_KHR);
+}
+
+// ── FK uniform wiring ───────────────────────────────────────────────────────
+
+const FK_VEC3_MAP = {
+  j0: "u_j0", j1: "u_j1", j2: "u_j2", j3: "u_j3", j4: "u_j4", j5: "u_j5",
+  flS: "u_flS", flE: "u_flE", flW: "u_flW", flP: "u_flP",
+  frS: "u_frS", frE: "u_frE", frW: "u_frW", frP: "u_frP",
+  rlH: "u_rlH", rlK: "u_rlK", rlHk: "u_rlHk", rlP: "u_rlP",
+  rrH: "u_rrH", rrK: "u_rrK", rrHk: "u_rrHk", rrP: "u_rrP",
+  t0: "u_t0", t1: "u_t1", t2: "u_t2", t3: "u_t3", t4: "u_t4",
+  catCenter: "u_catCenter", flegCenter: "u_flegCenter",
+  rlegCenter: "u_rlegCenter", tailCenter: "u_tailCenter",
+  ribcageRadii: "u_ribcageRadii", haunchRadii: "u_haunchRadii",
+};
+
+const FK_FLOAT_MAP = {
+  catRadius: "u_catRadius", flegRadius: "u_flegRadius",
+  rlegRadius: "u_rlegRadius", tailRadius: "u_tailRadius",
+  bodyRoll: "u_bodyRoll", breath: "u_breath", breathZ: "u_breathZ",
+  breathAmp: "u_breathAmp", bellyY: "u_bellyY",
+  loafWeight: "u_loafWeight", onBackWeight: "u_onBackWeight",
+  headPitch: "u_headPitch", headYaw: "u_headYaw",
+  earTilt: "u_earTilt", earFlare: "u_earFlare", earYaw: "u_earYawA",
+};
+
+const ALL_UNIFORM_NAMES = [
+  "u_resolution", "u_camera", "u_mode",
+  ...Object.values(FK_VEC3_MAP),
+  ...Object.values(FK_FLOAT_MAP),
+];
 
 function getUniformLocations(gl, program) {
-  return {
-    resolution: gl.getUniformLocation(program, "u_resolution"),
-    time: gl.getUniformLocation(program, "u_time"),
-    camera: gl.getUniformLocation(program, "u_camera"),
-    from: gl.getUniformLocation(program, "u_from"),
-    to: gl.getUniformLocation(program, "u_to"),
-    blend: gl.getUniformLocation(program, "u_blend"),
-    mode: gl.getUniformLocation(program, "u_mode"),
-    lick: gl.getUniformLocation(program, "u_lick"),
-    walkOffset: gl.getUniformLocation(program, "u_walkOffset"),
-    headYaw: gl.getUniformLocation(program, "u_headYaw"),
-  };
+  const locs = {};
+  for (const name of ALL_UNIFORM_NAMES) {
+    locs[name] = gl.getUniformLocation(program, name);
+  }
+  return locs;
 }
+
+// ── State & input ───────────────────────────────────────────────────────────
 
 function createState() {
   return {
@@ -161,17 +229,13 @@ function setPose(state, pose) {
   if (state.blendT >= 1) {
     src = state.toPose;
   } else {
-    // mid-blend pose change: snap source to whichever pose is visually dominant
     const eased = 1 - Math.pow(1 - state.blendT, 2.5);
     src = eased >= 0.5 ? state.toPose : state.fromPose;
   }
   if (pose === state.toPose) return;
   const key = `${src}_${pose}`;
   if (CAT_CONFIG.animation.blockedTransitions?.[key]) return;
-  // if paw is still raised (lick phase 0.00-0.60), skip to lowering phase
-  if (state.lickT < 0.60) {
-    state.lickT = 0.60;
-  }
+  if (state.lickT < 0.60) state.lickT = 0.60;
   if (pose === 4) {
     state.walkOffset = (performance.now() - state.startTime) * 0.001;
   }
@@ -254,23 +318,14 @@ function attachInputHandlers(canvas, state) {
         setPose(state, 4);
         return;
       }
-      if (key === "ArrowLeft") {
-        state.arrowLeft = true;
-        return;
-      }
-      if (key === "ArrowRight") {
-        state.arrowRight = true;
-        return;
-      }
+      if (key === "ArrowLeft") { state.arrowLeft = true; return; }
+      if (key === "ArrowRight") { state.arrowRight = true; return; }
       const lk = key.toLowerCase();
       if (lk >= "1" && lk <= "6") {
         setPose(state, POSE_KEYS[lk.charCodeAt(0) - 49]);
         return;
       }
-      if (lk === "d") {
-        state.mode = (state.mode + 1) % 3;
-        return;
-      }
+      if (lk === "d") { state.mode = (state.mode + 1) % 3; return; }
       if (lk === "l") {
         if (
           (state.toPose === 1 || state.toPose === 6) &&
@@ -292,31 +347,21 @@ function attachInputHandlers(canvas, state) {
         if (state.toPose === 4) setPose(state, 0);
         return;
       }
-      if (key === "ArrowLeft") {
-        state.arrowLeft = false;
-        return;
-      }
-      if (key === "ArrowRight") {
-        state.arrowRight = false;
-        return;
-      }
+      if (key === "ArrowLeft") { state.arrowLeft = false; return; }
+      if (key === "ArrowRight") { state.arrowRight = false; return; }
     },
     { passive: true },
   );
 }
 
+// ── Simulation & rendering ──────────────────────────────────────────────────
+
 function updateSimulation(state, dt) {
   if (state.blendT < 1) {
-    state.blendT = Math.min(
-      1,
-      state.blendT + dt / state.blendDurationSec,
-    );
+    state.blendT = Math.min(1, state.blendT + dt / state.blendDurationSec);
   }
   if (state.lickT < 1) {
-    state.lickT = Math.min(
-      1,
-      state.lickT + dt / CAT_CONFIG.animation.lickSeconds,
-    );
+    state.lickT = Math.min(1, state.lickT + dt / CAT_CONFIG.animation.lickSeconds);
   }
   const headTarget = ((state.arrowRight ? 1 : 0) - (state.arrowLeft ? 1 : 0)) *
     CAT_CONFIG.animation.headTurnMax;
@@ -325,32 +370,41 @@ function updateSimulation(state, dt) {
   state.headYawOffset += (headTarget - state.headYawOffset) * easeFactor;
 }
 
-function applyUniforms(gl, uniforms, canvas, state, now, start) {
+function applyUniforms(gl, locs, canvas, state, now, start) {
   const eased = 1 - Math.pow(1 - state.blendT, 2.5);
   const cp = Math.cos(state.camP), sp = Math.sin(state.camP);
   const camX = state.camD * cp * Math.sin(state.camT);
   const camY = state.camD * sp + 0.1;
   const camZ = state.camD * cp * Math.cos(state.camT);
 
-  if (uniforms.resolution) {
-    gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+  gl.uniform2f(locs["u_resolution"], canvas.width, canvas.height);
+  gl.uniform3f(locs["u_camera"], camX, camY, camZ);
+  gl.uniform1i(locs["u_mode"], state.mode);
+
+  const fk = computeCatFK({
+    from: state.fromPose,
+    to: state.toPose,
+    blend: eased,
+    lick: state.lickT,
+    walkOffset: state.walkOffset,
+    headYawOffset: state.headYawOffset,
+    time: (now - start) * 0.001,
+  });
+
+  for (const [prop, uName] of Object.entries(FK_VEC3_MAP)) {
+    const loc = locs[uName];
+    if (loc) {
+      const v = fk[prop];
+      gl.uniform3f(loc, v[0], v[1], v[2]);
+    }
   }
-  if (uniforms.time) gl.uniform1f(uniforms.time, (now - start) * 0.001);
-  if (uniforms.camera) {
-    gl.uniform3f(uniforms.camera, camX, camY, camZ);
-  }
-  if (uniforms.from) gl.uniform1f(uniforms.from, state.fromPose);
-  if (uniforms.to) gl.uniform1f(uniforms.to, state.toPose);
-  if (uniforms.blend) gl.uniform1f(uniforms.blend, eased);
-  if (uniforms.mode) gl.uniform1i(uniforms.mode, state.mode);
-  if (uniforms.lick) gl.uniform1f(uniforms.lick, state.lickT);
-  if (uniforms.walkOffset) {
-    gl.uniform1f(uniforms.walkOffset, state.walkOffset);
-  }
-  if (uniforms.headYaw) {
-    gl.uniform1f(uniforms.headYaw, state.headYawOffset);
+  for (const [prop, uName] of Object.entries(FK_FLOAT_MAP)) {
+    const loc = locs[uName];
+    if (loc) gl.uniform1f(loc, fk[prop]);
   }
 }
+
+// ── Init ────────────────────────────────────────────────────────────────────
 
 async function init() {
   const canvas = document.getElementById("c");
@@ -360,22 +414,39 @@ async function init() {
     return;
   }
 
-  const fragSource = await loadFragmentSource(FRAG_PATH);
-  const configGLSL = shaderConfigToGLSL(CAT_CONFIG.shader);
-  // inject shader constants after the precision #endif guard so they
-  // appear before any GLSL code that references them
-  const endifIdx = fragSource.indexOf("#endif");
-  if (endifIdx < 0) throw new Error("cat.frag: missing #endif precision guard");
-  const insertPos = endifIdx + "#endif".length;
-  const fullSource = fragSource.slice(0, insertPos) +
-    "\n" +
-    configGLSL +
-    fragSource.slice(insertPos);
+  const parallelExt = gl.getExtension("KHR_parallel_shader_compile");
 
-  const program = createProgram(gl, fullSource);
-  gl.useProgram(program);
-  setupFullscreenQuad(gl, program);
-  const uniforms = getUniformLocations(gl, program);
+  // Fetch shader source (allow browser caching)
+  const res = await fetch(FRAG_PATH);
+  if (!res.ok) throw new Error(FRAG_PATH + ": " + res.status);
+  const fragBase = await res.text();
+
+  // Shared vertex buffer — attribute 0 is pinned via bindAttribLocation
+  setupFullscreenQuad(gl);
+
+  // Determine quality strategy
+  const qualityParam = new URLSearchParams(window.location.search).get("quality");
+  const wantProgressive = !qualityParam; // progressive when no explicit preference
+  const initialPreset = (qualityParam === "high" && !wantProgressive)
+    ? QUALITY_PRESETS.high
+    : QUALITY_PRESETS.fast;
+
+  // Compile initial shader (async if extension available)
+  const initialSource = buildFullShaderSource(fragBase, initialPreset);
+  const initialCompile = startProgramCompile(gl, initialSource);
+  await waitForCompletion(gl, initialCompile, parallelExt);
+  let currentProgram = validateProgram(gl, initialCompile);
+
+  gl.useProgram(currentProgram);
+  let locs = getUniformLocations(gl, currentProgram);
+
+  // Start background compilation of high-quality shader
+  let pendingUpgrade = null;
+  if (wantProgressive) {
+    const highSource = buildFullShaderSource(fragBase, QUALITY_PRESETS.high);
+    pendingUpgrade = startProgramCompile(gl, highSource);
+  }
+
   const state = createState();
   attachInputHandlers(canvas, state);
 
@@ -398,11 +469,26 @@ async function init() {
   const start = performance.now();
   state.startTime = start;
   let prev = start;
+
   function frame(now) {
+    // Check for high-quality upgrade
+    if (pendingUpgrade && isCompileComplete(gl, pendingUpgrade.program, parallelExt)) {
+      try {
+        const upgraded = validateProgram(gl, pendingUpgrade);
+        gl.deleteProgram(currentProgram);
+        currentProgram = upgraded;
+        gl.useProgram(currentProgram);
+        locs = getUniformLocations(gl, currentProgram);
+      } catch (e) {
+        console.warn("High-quality shader failed, staying on fast:", e.message);
+      }
+      pendingUpgrade = null;
+    }
+
     const dt = Math.min((now - prev) * 0.001, 0.1);
     prev = now;
     updateSimulation(state, dt);
-    applyUniforms(gl, uniforms, canvas, state, now, start);
+    applyUniforms(gl, locs, canvas, state, now, start);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     requestAnimationFrame(frame);
   }
